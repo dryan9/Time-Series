@@ -1,0 +1,165 @@
+---
+title: "time_series_energyEstimation_ETS"
+output: html_document
+author: "Danny Ryan"
+date: "2024-09-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(fpp3)
+library(fable)
+library(fabletools)
+library(lubridate)
+library(expsmooth)
+library(lmtest)
+library(zoo)
+library(seasonal)
+library(ggplot2)
+library(seasonalview)
+library(aTSA)
+library(dplyr)
+library(tsibble)
+library(ggplot2)
+```
+
+
+```{r}
+#reading in csv data to dataset 
+energy <- read.csv("https://raw.githubusercontent.com/sjsimmo2/TimeSeries/master/energy_F2024.csv")
+str(energy)
+```
+
+```{r}
+#first separating out the date, and then grouping by date, and taking the sum MW per day
+energy1 <- energy %>% separate(col = datetime_beginning_ept, into=c("date1", "else"), sep =" ") %>% 
+        group_by(date1) %>% summarise(mw_tot = sum(mw))
+str(energy1)
+energy1
+```
+
+```{r}
+#putting date2 into 'date' format, making month (which is month and year), 
+  #and then grouping by month and getting the average of the daily sum for each month/year
+energy2 <- energy1 %>% mutate(date2 = mdy(date1), month = yearmonth(date2)) %>% group_by(month) %>% 
+            summarise(month_avg = mean(mw_tot))
+str(energy2)
+energy2
+```
+
+```{r}
+#making dataset into tsibble, with the month/year as the index
+energy_ts <- energy2 %>% as_tsibble(index = month)
+str(energy_ts)
+energy_ts
+```
+
+```{r}
+#train dataset is from August 2018 - July 2022
+train_energy <- energy_ts %>% filter_index("2018 Aug" ~ "2022 Jul")
+train_energy
+
+#validation should be from August 2022 - July 2023
+validate_energy <- energy_ts %>% filter_index("2022 Aug" ~ "2023 Jul")
+validate_energy
+
+#and test should be from August 2023 - July 2024.
+test_energy <- energy_ts %>% filter_index("2023 Aug" ~. )
+test_energy
+```
+
+
+```{r}
+#first decomposing the energy training dataset
+dcmp_energy <- train_energy %>% 
+  model(stl = STL(month_avg))
+components(dcmp_energy)
+
+#overall graph with trend, season, and remainder
+components(dcmp_energy) %>%  autoplot() + theme_classic()
+```
+
+```{r}
+#training dataset overlaid with the trend
+components(dcmp_energy) %>% 
+  as_tsibble() %>% 
+  autoplot(month_avg, colour="gray") +
+  geom_line(aes(y=trend), colour = "#D55E00") +
+  labs(
+    y = "energy",
+    title = "energy usage"
+  )
+
+#STL decomposition was used
+```
+
+```{r}
+#checking strength of trend and strength of season in case something stands out
+train_energy %>% features(month_avg, feat_stl)
+
+#trend strength = 0.368
+#seasonal strength = 0.914
+
+```
+
+```{r}
+print(nrow(train_energy))
+print(nrow(validate_energy)) 
+print(nrow(test_energy))
+
+#48 rows in training dataset
+#12 rows in validation and 12 rows in train
+
+```
+
+
+```{r}
+#testing out different ETS models --> will compare with accuracy on the test data
+energy_fit <- train_energy %>% model(
+  'HWMult_ANM' = ETS(month_avg ~ error("A") + trend("N") + season("M")),
+  'HWMult_AaDM' = ETS(month_avg ~ error("A") + trend("Ad") + season("M")),
+  'HWMult_AAM' = ETS(month_avg ~ error("A") + trend("A") + season("M")),
+  'HWMult_MNM' = ETS(month_avg ~ error("M") + trend("N") + season("M")),
+  'HWMult_MadM' = ETS(month_avg ~ error("M") + trend("Ad") + season("M")),
+  'HWMult_MAM' = ETS(month_avg ~ error("M") + trend("A") + season("M"))
+  )
+report(energy_fit)
+energy_fit
+
+#using the models created above to forecast out 12 data points (which is the length of the validation dataset)
+energy_fc <- energy_fit %>% 
+  fabletools::forecast(h = 12)
+
+#getting accuracy measures for the model "energy auto" on the validation dataset 
+fabletools::accuracy(energy_fc,validate_energy)
+
+#HWMult_MAM was the winner
+```
+
+
+```{r}
+#selecting HWMult_MAM due to best accuracy on the test data
+energy_fit_good <- train_energy %>% model(
+  'HWMult_MAM' = ETS(month_avg ~ error("M") + trend("A") + season("M"))
+  )
+report(energy_fit_good)
+energy_fit_good
+
+#using the models created above to forecast out 12 data points (which is the length of the validation dataset)
+energy_fc_good <- energy_fit_good %>% 
+  fabletools::forecast(h = 12)
+
+#getting accuracy measures for the model "energy auto" on the validation dataset 
+fabletools::accuracy(energy_fc_good,validate_energy)
+```
+----------------------------------------------------------------------------
+----------------------------------------------------------------------------
+----------------------------------------------------------------------------
+----------------------------------------------------------------------------
+----------------------------------------------------------------------------
+----------------------------------------------------------------------------
+----------------------------------------------------------------------------
+
+
+

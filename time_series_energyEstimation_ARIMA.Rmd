@@ -1,0 +1,165 @@
+---
+title: "time_series_energyEstimation_ARIMA"
+output: html_document
+date: "2025-01-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(fpp3)
+library(fable)
+library(fabletools)
+library(lubridate)
+library(expsmooth)
+library(lmtest)
+library(zoo)
+library(seasonal)
+library(ggplot2)
+library(seasonalview)
+library(aTSA)
+library(dplyr)
+library(tsibble)
+library(ggplot2)
+```
+
+```{r}
+#reading in csv data to dataset 
+energy <- read.csv("https://raw.githubusercontent.com/sjsimmo2/TimeSeries/master/energy_F2024.csv")
+str(energy)
+```
+
+```{r}
+#first separating out the date, and then grouping by date, and taking the sum MW per day
+energy1 <- energy %>% separate(col = datetime_beginning_ept, into=c("date1", "else"), sep =" ") %>% 
+        group_by(date1) %>% summarise(mw_tot = sum(mw))
+str(energy1)
+energy1
+```
+
+```{r}
+#putting date2 into 'date' format, making month (which is month and year), 
+  #and then grouping by month and getting the average of the daily sum for each month/year
+energy2 <- energy1 %>% mutate(date2 = mdy(date1), month = yearmonth(date2)) %>% group_by(month) %>% 
+            summarise(month_avg = mean(mw_tot))
+str(energy2)
+energy2
+```
+
+```{r}
+#making dataset into tsibble, with the month/year as the index
+energy_ts <- energy2 %>% as_tsibble(index = month)
+str(energy_ts)
+energy_ts
+```
+
+```{r}
+#train dataset is from August 2018 - July 2022
+train_energy <- energy_ts %>% filter_index("2018 Aug" ~ "2022 Jul")
+train_energy
+
+#validation should be from August 2022 - July 2023
+validate_energy <- energy_ts %>% filter_index("2022 Aug" ~ "2023 Jul")
+validate_energy
+
+#and test should be from August 2023 - July 2024.
+test_energy <- energy_ts %>% filter_index("2023 Aug" ~. )
+test_energy
+```
+
+
+```{r}
+#first decomposing the energy training dataset
+dcmp_energy <- train_energy %>% 
+  model(stl = STL(month_avg))
+components(dcmp_energy)
+
+#overall graph with trend, season, and remainder
+components(dcmp_energy) %>%  autoplot() + theme_classic()
+```
+
+```{r}
+#training dataset overlaid with the trend
+components(dcmp_energy) %>% 
+  as_tsibble() %>% 
+  autoplot(month_avg, colour="gray") +
+  geom_line(aes(y=trend), colour = "#D55E00") +
+  labs(
+    y = "energy",
+    title = "energy usage"
+  )
+
+#STL decomposition was used
+```
+
+```{r}
+#checking strength of trend and strength of season in case something stands out
+train_energy %>% features(month_avg, feat_stl)
+
+#trend strength = 0.368
+#seasonal strength = 0.914
+
+```
+
+
+```{r}
+str(train_energy)
+#month is the index, and month_avg is the value
+```
+
+```{r}
+#checking stationarity
+train_energy %>% features(month_avg, unitroot_kpss)
+#p value of 0.1 leads us to fail to reject the null hypothosis and conclude the data is stationary
+train_energy %>% features(month_avg, unitroot_ndiffs)
+
+```
+
+```{r}
+#ACF plotting of data
+ggAcf(train_energy$month_avg,lag=25)
+# I am seeing a significant spike at lag = 9, indicating potentially an MA(9) model
+#acf is seasonal --> not bad
+
+#PACF plotting of data
+ggPacf(train_energy$month_avg,lag=25)
+#I am seeing a spike a 7, indicating possibly an AR(7) model
+#also exponentially decreasing (so it seems I think), so maybe will also try no AR terms as well
+
+```
+
+
+```{r}
+#first testing models using some with only MA terms (AR1, AR2), and some with AR and MA terms (AR3, AR4),
+  # and then comaparing to the auto search models (search1, search2)
+energy_model <- train_energy %>%
+  model(ar1 = ARIMA(month_avg ~ pdq(0,0,9) + PDQ(0,0,0) + 1),
+        ar2 = ARIMA(month_avg ~ pdq(0,0,9) + PDQ(0,0,0) + 0),
+        ar3 = ARIMA(month_avg ~ pdq(3,0,9) + PDQ(0,0,0) + 1),
+        ar4 = ARIMA(month_avg ~ pdq(3,0,9) + PDQ(0,0,0) + 0),
+        search1 = ARIMA(month_avg ~ pdq() + PDQ(0,0,0)),
+        search2 = ARIMA(month_avg,stepwise = F))
+
+energy_model2<-as.data.frame(energy_model)
+t(energy_model2)
+
+#using BIC as selection criteria to compare and select one of the 6 models from energy_model
+glance(energy_model) %>% arrange(AICc) %>% select(.model:BIC)
+```
+
+
+```{r}
+#checking residuals for visual signs of remaing auto-correlation
+arima_1 %>% residuals() %>% ggAcf()
+arima_1 %>% residuals() %>% ggPacf()
+#looks good --> no auto correlation present at any lag on either plot
+
+#statitical test for autocorrelation
+augment(arima_1) %>% features(.innov,ljung_box, lag=10, dof = 16)
+#p-value > 0.05 --> no autocorrelation, which is good
+```
+
+
+
+
+
